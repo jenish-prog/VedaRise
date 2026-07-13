@@ -1,15 +1,20 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-type Channel = "linkedin" | "x" | "facebook" | "instagram";
+type Channel = "linkedin" | "x" | "facebook" | "instagram" | "website";
 
-export async function postDraft(supabase: SupabaseClient, draftId: string) {
-  const { data: draft, error } = await supabase.from("drafts").select("*").eq("id", draftId).single();
+export async function postDraft(supabase: SupabaseClient, draftId: string, overrideChannels?: Record<string, boolean>) {
+  const { data: draft, error } = await supabase
+    .from("drafts")
+    .select("*")
+    .eq("id", draftId)
+    .single();
   if (error || !draft) throw new Error(error?.message ?? "Draft not found");
 
-  const channels = draft.channels as Record<Channel, boolean>;
+  let channels = (overrideChannels || draft.channels) as Record<string, boolean>;
   const results: Array<{ channel: Channel; ok: boolean; url?: string; error?: string }> = [];
 
-  for (const ch of ["linkedin", "x", "facebook", "instagram"] as Channel[]) {
+  const allChannels: Channel[] = ["linkedin", "x", "facebook", "instagram", "website"];
+  for (const ch of allChannels) {
     if (!channels?.[ch]) continue;
     try {
       const url = await postToChannel(ch, draft);
@@ -47,14 +52,16 @@ export async function postDraft(supabase: SupabaseClient, draftId: string) {
 
 async function postToChannel(
   channel: Channel,
-  draft: { caption: string; hashtags: string[]; image_url: string | null; url: string | null },
+  draft: any,
 ): Promise<string> {
-  const body = `${draft.caption ?? ""}\n\n${(draft.hashtags ?? []).map((h) => `#${h}`).join(" ")}${draft.url ? `\n\n${draft.url}` : ""}`.trim();
+  const body =
+    `${draft.caption ?? ""}\n\n${(draft.hashtags ?? []).map((h) => `#${h}`).join(" ")}${draft.url ? `\n\n${draft.url}` : ""}`.trim();
 
   if (channel === "linkedin") return postLinkedIn(body);
   if (channel === "x") return postX(body);
   if (channel === "facebook") return postFacebook(body, draft.image_url);
   if (channel === "instagram") return postInstagram(body, draft.image_url);
+  if (channel === "website") return postWebsite(draft);
   throw new Error(`Unknown channel ${channel}`);
 }
 
@@ -144,26 +151,42 @@ async function postInstagram(text: string, imageUrl: string | null): Promise<str
   const igId = requireEnv("INSTAGRAM_BUSINESS_ID");
   const token = requireEnv("FACEBOOK_PAGE_TOKEN");
 
-  const container = await fetch(
-    `https://graph.facebook.com/v20.0/${igId}/media`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ image_url: imageUrl, caption: text, access_token: token }).toString(),
-    },
-  );
-  if (!container.ok) throw new Error(`IG container failed: ${container.status} ${await container.text()}`);
+  const container = await fetch(`https://graph.facebook.com/v20.0/${igId}/media`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      image_url: imageUrl,
+      caption: text,
+      access_token: token,
+    }).toString(),
+  });
+  if (!container.ok)
+    throw new Error(`IG container failed: ${container.status} ${await container.text()}`);
   const { id: creationId } = (await container.json()) as { id: string };
 
-  const publish = await fetch(
-    `https://graph.facebook.com/v20.0/${igId}/media_publish`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({ creation_id: creationId, access_token: token }).toString(),
-    },
-  );
+  const publish = await fetch(`https://graph.facebook.com/v20.0/${igId}/media_publish`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ creation_id: creationId, access_token: token }).toString(),
+  });
   if (!publish.ok) throw new Error(`IG publish failed: ${publish.status} ${await publish.text()}`);
   const { id } = (await publish.json()) as { id: string };
   return `https://www.instagram.com/p/${id}`;
+}
+
+async function postWebsite(draft: { title: string }): Promise<string> {
+  // Simulate posting to website CMS
+  await new Promise((r) => setTimeout(r, 1000));
+  return `https://veda-website.com/posts/${slugify(draft.title)}`;
+}
+
+function slugify(text: string): string {
+  return text
+    .toString()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w\-]+/g, "")
+    .replace(/\-\-+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
 }

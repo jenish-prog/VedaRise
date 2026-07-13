@@ -40,8 +40,8 @@ export async function runPipeline(supabase: SupabaseClient) {
       // Upload PNG/SVG to storage
       const isSvg = image.startsWith("<svg");
       const path = `${runDate}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}`;
-      const bytes = isSvg 
-        ? new TextEncoder().encode(image) 
+      const bytes = isSvg
+        ? new TextEncoder().encode(image)
         : Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
       const up = await supabase.storage.from("post-images").upload(path, bytes, {
         contentType: isSvg ? "image/svg+xml" : "image/png",
@@ -49,7 +49,9 @@ export async function runPipeline(supabase: SupabaseClient) {
       });
       if (up.error) throw up.error;
 
-      const { data: signed } = await supabase.storage.from("post-images").createSignedUrl(path, 60 * 60 * 24 * 30);
+      const { data: signed } = await supabase.storage
+        .from("post-images")
+        .createSignedUrl(path, 60 * 60 * 24 * 30);
 
       const { error } = await supabase.from("drafts").insert({
         run_date: runDate,
@@ -67,7 +69,11 @@ export async function runPipeline(supabase: SupabaseClient) {
       if (error) throw error;
       results.push({ ok: true, title: item.title });
     } catch (err) {
-      results.push({ ok: false, title: item.title, error: err instanceof Error ? err.message : String(err) });
+      results.push({
+        ok: false,
+        title: item.title,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return { runDate, count: results.filter((r) => r.ok).length, results };
@@ -78,11 +84,24 @@ async function fetchTrendingNews(): Promise<NewsItem[]> {
   // Two queries — one for historical/ancient manuscripts, one for academic manuscripts —
   // then merge, dedupe, and let AI pick the top 5 trending.
   const queries: Array<{ q: string; topic: "historical" | "academic" }> = [
-    { q: '"manuscript" OR "manuscripts" (ancient OR medieval OR discovered OR auction OR digitization)', topic: "historical" },
-    { q: '"manuscript" (journal OR preprint OR "peer review" OR retraction OR submission)', topic: "academic" },
+    {
+      q: '"manuscript" OR "manuscripts" (ancient OR medieval OR discovered OR auction OR digitization)',
+      topic: "historical",
+    },
+    {
+      q: '"manuscript" (journal OR preprint OR "peer review" OR retraction OR submission)',
+      topic: "academic",
+    },
   ];
 
-  const raw: Array<{ title: string; source: string; url: string; summary: string; topic: "historical" | "academic"; pubDate: string }> = [];
+  const raw: Array<{
+    title: string;
+    source: string;
+    url: string;
+    summary: string;
+    topic: "historical" | "academic";
+    pubDate: string;
+  }> = [];
   for (const { q, topic } of queries) {
     const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q + " when:1d")}&hl=en-US&gl=US&ceid=US:en`;
     const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 ManuscriptsDaily/1.0" } });
@@ -108,7 +127,18 @@ async function fetchTrendingNews(): Promise<NewsItem[]> {
 
   // Ask AI to pick top 5 trending
   const apiKey = process.env.API_KEY;
-  if (!apiKey) return shortlist.slice(0, 5);
+  if (!apiKey) {
+    return shortlist.slice(0, 5).map((i) => {
+      const mockSummary = `A curated update on "${i.title}". This finding highlights new developments in the preservation, study, and digital archiving of historical manuscripts and scholarly research worldwide.`;
+      return {
+        title: i.title,
+        source: i.source,
+        url: i.url,
+        summary: i.summary && i.summary.length > 50 ? i.summary : mockSummary,
+        topic: i.topic,
+      };
+    });
+  }
 
   try {
     const r = await fetch(`${AI_URL}/chat/completions`, {
@@ -120,11 +150,18 @@ async function fetchTrendingNews(): Promise<NewsItem[]> {
           {
             role: "system",
             content:
-              "You rank news items about manuscripts. Given a list of candidates from the last 24h, return the top 5 most trending/impactful. Balance historical and academic topics. For each, write a punchy 1-2 sentence summary (do not copy the headline). Return strict JSON: {\"items\":[{\"index\":number,\"summary\":string}]}. `index` is the 0-based position in the input list.",
+              'You rank news items about manuscripts. Given a list of candidates from the last 24h, return the top 5 most trending/impactful. Balance historical and academic topics. For each, write a natural, engaging, and human-written 1-2 sentence summary (do not copy the headline). Avoid robotic transitions, overly formal phrasing, or AI jargon. Write as if you are a human researcher summarizing the find for a colleague. Return strict JSON: {"items":[{"index":number,"summary":string}]}. `index` is the 0-based position in the input list.',
           },
           {
             role: "user",
-            content: JSON.stringify(shortlist.map((i, idx) => ({ index: idx, title: i.title, source: i.source, topic: i.topic }))),
+            content: JSON.stringify(
+              shortlist.map((i, idx) => ({
+                index: idx,
+                title: i.title,
+                source: i.source,
+                topic: i.topic,
+              })),
+            ),
           },
         ],
         response_format: { type: "json_object" },
@@ -132,11 +169,20 @@ async function fetchTrendingNews(): Promise<NewsItem[]> {
     });
     if (r.ok) {
       const j = (await r.json()) as { choices: Array<{ message: { content: string } }> };
-      const picks = JSON.parse(j.choices[0].message.content) as { items: Array<{ index: number; summary: string }> };
+      const picks = JSON.parse(j.choices[0].message.content) as {
+        items: Array<{ index: number; summary: string }>;
+      };
       const chosen: NewsItem[] = [];
       for (const p of picks.items.slice(0, 5)) {
         const item = shortlist[p.index];
-        if (item) chosen.push({ title: item.title, source: item.source, url: item.url, summary: p.summary, topic: item.topic });
+        if (item)
+          chosen.push({
+            title: item.title,
+            source: item.source,
+            url: item.url,
+            summary: p.summary,
+            topic: item.topic,
+          });
       }
       if (chosen.length > 0) return chosen;
     }
@@ -144,11 +190,28 @@ async function fetchTrendingNews(): Promise<NewsItem[]> {
     // fall through
   }
 
-  return shortlist.slice(0, 5).map((i) => ({ title: i.title, source: i.source, url: i.url, summary: i.title, topic: i.topic }));
+  return shortlist.slice(0, 5).map((i) => {
+    const mockSummary = `A curated update on "${i.title}". This finding highlights new developments in the preservation, study, and digital archiving of historical manuscripts and scholarly research worldwide.`;
+    return {
+      title: i.title,
+      source: i.source,
+      url: i.url,
+      summary: i.summary && i.summary.length > 50 ? i.summary : mockSummary,
+      topic: i.topic,
+    };
+  });
 }
 
-function parseRss(xml: string): Array<{ title: string; source: string; url: string; summary: string; pubDate: string }> {
-  const items: Array<{ title: string; source: string; url: string; summary: string; pubDate: string }> = [];
+function parseRss(
+  xml: string,
+): Array<{ title: string; source: string; url: string; summary: string; pubDate: string }> {
+  const items: Array<{
+    title: string;
+    source: string;
+    url: string;
+    summary: string;
+    pubDate: string;
+  }> = [];
   const itemRegex = /<item>([\s\S]*?)<\/item>/g;
   let m: RegExpExecArray | null;
   while ((m = itemRegex.exec(xml)) !== null) {
@@ -156,8 +219,11 @@ function parseRss(xml: string): Array<{ title: string; source: string; url: stri
     const title = decode(pick(block, "title"));
     const link = decode(pick(block, "link"));
     const pubDate = pick(block, "pubDate");
-    const source = decode(pick(block, "source")) || new URL(link || "https://news.google.com").hostname;
-    const description = decode(pick(block, "description")).replace(/<[^>]+>/g, "").trim();
+    const source =
+      decode(pick(block, "source")) || new URL(link || "https://news.google.com").hostname;
+    const description = decode(pick(block, "description"))
+      .replace(/<[^>]+>/g, "")
+      .trim();
     if (title && link) items.push({ title, url: link, source, summary: description, pubDate });
   }
   return items;
@@ -183,11 +249,12 @@ function decode(s: string): string {
     .trim();
 }
 
-async function generateImage(key: string, item: NewsItem, rank?: number): Promise<string> {
+async function generateImage(key: string, item: NewsItem, rank?: number, styleSeed?: number): Promise<string> {
   if (!key) {
-    return generateSvgImage(item, rank || 1);
+    const seed = styleSeed !== undefined ? styleSeed : (rank || 1);
+    return generateSvgImage(item, seed);
   }
-  const prompt = buildImagePrompt(item);
+  const prompt = buildImagePrompt(item, styleSeed);
   const res = await fetch(`${AI_URL}/images/generations`, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
@@ -207,11 +274,22 @@ async function generateImage(key: string, item: NewsItem, rank?: number): Promis
 // Editorial poster template inspired by Project Veda: warm dark brown background,
 // aged manuscript pages, dramatic gold-lit letterforms hinting at the topic, elegant
 // serif headline overlay, thin ornamental gold divider, subtle caption line at bottom.
-function buildImagePrompt(item: NewsItem): string {
+function buildImagePrompt(item: NewsItem, styleSeed?: number): string {
   const shortHeadline = item.title.length > 90 ? item.title.slice(0, 90) + "…" : item.title;
+  
+  const bgStyles = [
+    "rich warm dark brown and deep sepia gradient, subtle vignette, softly lit aged palm-leaf or paper manuscript pages with faint script visible as texture",
+    "mysterious deep indigo and midnight blue gradient with faint stardust texture and glowing gold-leaf script outlines",
+    "ancient olive green and gold gradient, reminding of weathered parchment in a historic monastic library",
+    "dramatic dark crimson and charcoal black gradient, evoking early printing presses and old leather-bound books with gold accents"
+  ];
+  
+  const seed = styleSeed !== undefined ? styleSeed : Math.floor(Math.random() * bgStyles.length);
+  const selectedBg = bgStyles[seed % bgStyles.length];
+
   return [
     "Editorial social media poster, exactly 1080x1080 square, portrait-safe composition.",
-    "Background: rich warm dark brown and deep sepia gradient, subtle vignette, softly lit aged palm-leaf or paper manuscript pages with faint script visible as texture (no readable body text).",
+    `Background: ${selectedBg} (no readable body text).`,
     "Top center: small refined serif eyebrow label reading 'MANUSCRIPTS DAILY' in muted cream, wide letter-spacing.",
     "Center focal element: an elegant gold-illuminated ornamental motif or a single large gilded serif letterform (do not spell full words), evoking ancient manuscripts.",
     `Lower half: crisp elegant serif headline in warm cream (#F1E4C6), 2-3 lines, centered, reading exactly: "${shortHeadline}"`,
@@ -225,11 +303,27 @@ function buildImagePrompt(item: NewsItem): string {
 async function generateCaption(
   key: string,
   item: NewsItem,
+  currentCaption?: string,
 ): Promise<{ caption: string; hashtags: string[] }> {
   if (!key) {
+    const isHist = item.topic === "historical";
+    const captions = isHist
+      ? [
+          `Just read about: "${item.title}". It's fascinating how ancient records like this continue to shape our history.`,
+          `Fascinating discovery: "${item.title}". A really incredible find that adds a new chapter to our heritage.`,
+          `This is remarkable: "${item.title}". It's amazing to see these ancient manuscript details coming to light.`,
+        ]
+      : [
+          `Really interesting research update: "${item.title}". Great to see medical/scholarly insights progressing like this.`,
+          `Here is an interesting look at: "${item.title}". Crucial work being done by the research community here.`,
+          `Fascinating publication on: "${item.title}". Always inspiring to follow new academic developments.`,
+        ];
+    const filtered = captions.filter((c) => c !== currentCaption);
+    const chosenList = filtered.length > 0 ? filtered : captions;
+    const idx = Math.floor(Math.random() * chosenList.length);
     return {
-      caption: `Interesting manuscript update: ${item.summary || item.title}`,
-      hashtags: [item.topic, "manuscripts", "history", "scholarly"]
+      caption: chosenList[idx],
+      hashtags: [item.topic || "history", "manuscripts", isHist ? "heritage" : "academic"],
     };
   }
   const res = await fetch(`${AI_URL}/chat/completions`, {
@@ -241,7 +335,7 @@ async function generateCaption(
         {
           role: "system",
           content:
-            "You write engaging social captions for a global audience interested in manuscripts (historical and academic). Keep captions under 220 characters. Return 6-10 relevant hashtags. Return strict JSON {\"caption\":string,\"hashtags\":string[]}. Hashtags without # prefix.",
+            "You write engaging social captions for a global audience interested in manuscripts (historical and academic). Speak like an enthusiastic human historian or scholar sharing a fascinating update in a natural, conversational tone. Do NOT use typical AI clichés (e.g., 'delve', 'testament', 'exciting news', 'unlocking secrets', 'beckons'). Keep the caption conversational and under 220 characters. Avoid placing emojis or hashtags inside the caption itself. Return 4-6 highly specific, relevant hashtags in the hashtags array. Return strict JSON {\"caption\":string,\"hashtags\":string[]}. Hashtags without # prefix.",
         },
         {
           role: "user",
@@ -253,7 +347,10 @@ async function generateCaption(
   });
   if (!res.ok) throw new Error(`Caption gen ${res.status}: ${await res.text()}`);
   const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-  const parsed = JSON.parse(json.choices[0].message.content) as { caption: string; hashtags: string[] };
+  const parsed = JSON.parse(json.choices[0].message.content) as {
+    caption: string;
+    hashtags: string[];
+  };
   return {
     caption: parsed.caption ?? "",
     hashtags: (parsed.hashtags ?? []).map((h) => h.replace(/^#/, "")),
@@ -263,14 +360,14 @@ async function generateCaption(
 function generateSvgImage(item: NewsItem, rank: number): string {
   const hasImage = !!item.scrapedImgUrl;
   const firstLetter = item.title.trim().charAt(0).toUpperCase() || "M";
-  
+
   const headlineStartY = hasImage ? 685 : 550;
   const headlineLineHeight = 52;
   const maxHeadlineLines = hasImage ? 2 : 3;
   const headlineLines = wrapText(item.title, 35).slice(0, maxHeadlineLines);
-  
+
   const dividerY = hasImage ? 805 : 710;
-  
+
   const captionStartY = hasImage ? 850 : 770;
   const captionLineHeight = 28;
   const maxCaptionLines = hasImage ? 2 : 3;
@@ -351,13 +448,19 @@ function generateSvgImage(item: NewsItem, rank: number): string {
     dividerStyle = "crimson";
   }
 
-  const headlineSvg = headlineLines.map((line, idx) => 
-    `<text x="540" y="${headlineStartY + idx * headlineLineHeight}" text-anchor="middle" font-family="'Playfair Display', 'Georgia', serif" font-size="38" font-weight="bold" fill="${titleColor}">${escapeXml(line)}</text>`
-  ).join("\n");
+  const headlineSvg = headlineLines
+    .map(
+      (line, idx) =>
+        `<text x="540" y="${headlineStartY + idx * headlineLineHeight}" text-anchor="middle" font-family="'Playfair Display', 'Georgia', serif" font-size="38" font-weight="bold" fill="${titleColor}">${escapeXml(line)}</text>`,
+    )
+    .join("\n");
 
-  const captionSvg = captionLines.map((line, idx) => 
-    `<text x="540" y="${captionStartY + idx * captionLineHeight}" text-anchor="middle" font-family="'Inter', 'sans-serif'" font-size="19" fill="${captionColor}" opacity="0.95">${escapeXml(line)}</text>`
-  ).join("\n");
+  const captionSvg = captionLines
+    .map(
+      (line, idx) =>
+        `<text x="540" y="${captionStartY + idx * captionLineHeight}" text-anchor="middle" font-family="'Inter', 'sans-serif'" font-size="19" fill="${captionColor}" opacity="0.95">${escapeXml(line)}</text>`,
+    )
+    .join("\n");
 
   let middleContent = "";
   if (hasImage) {
@@ -406,9 +509,8 @@ function generateSvgImage(item: NewsItem, rank: number): string {
     `;
   }
 
-  const bottomLogoColor = (styleIndex === 0 || styleIndex === 2 || styleIndex === 3) 
-    ? "url(#goldGrad)" 
-    : accentColor;
+  const bottomLogoColor =
+    styleIndex === 0 || styleIndex === 2 || styleIndex === 3 ? "url(#goldGrad)" : accentColor;
 
   return `
 <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg">
@@ -476,12 +578,18 @@ function wrapText(text: string, maxChars: number): string[] {
 function escapeXml(unsafe: string): string {
   return unsafe.replace(/[<>&'"]/g, (c) => {
     switch (c) {
-      case "<": return "&lt;";
-      case ">": return "&gt;";
-      case "&": return "&amp;";
-      case "'": return "&apos;";
-      case "\"": return "&quot;";
-      default: return c;
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case "&":
+        return "&amp;";
+      case "'":
+        return "&apos;";
+      case '"':
+        return "&quot;";
+      default:
+        return c;
     }
   });
 }
@@ -490,9 +598,10 @@ async function fetchImageAsBase64(imageUrl: string): Promise<string | null> {
   try {
     const res = await fetch(imageUrl, {
       headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
     const arrayBuffer = await res.arrayBuffer();
@@ -508,7 +617,7 @@ async function fetchImageAsBase64(imageUrl: string): Promise<string | null> {
 async function scrapeArticleImage(url: string): Promise<string | null> {
   try {
     let targetUrl = url;
-    
+
     if (url.includes("news.google.com")) {
       const decoded = await googleDecoder.decode(url);
       if (decoded.status && decoded.decoded_url) {
@@ -517,25 +626,30 @@ async function scrapeArticleImage(url: string): Promise<string | null> {
     }
 
     const res = await fetch(targetUrl, {
-      headers: { 
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
       },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
     const html = await res.text();
-    
-    const ogImageMatch = html.match(/<meta\s+(?:property|name)=["']og:image["']\s+content=["']([^"']+)["']/i) ||
-                         html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:image["']/i);
+
+    const ogImageMatch =
+      html.match(/<meta\s+(?:property|name)=["']og:image["']\s+content=["']([^"']+)["']/i) ||
+      html.match(/<meta\s+content=["']([^"']+)["']\s+(?:property|name)=["']og:image["']/i);
     if (ogImageMatch && ogImageMatch[1]) {
       const imgUrl = ogImageMatch[1].trim();
       const base64 = await fetchImageAsBase64(imgUrl);
       if (base64) return base64;
     }
-    
-    const imgMatch = html.match(/<img\s+[^>]*src=["'](https?:\/\/[^"']+\.(?:png|jpg|jpeg|webp))["']/i);
+
+    const imgMatch = html.match(
+      /<img\s+[^>]*src=["'](https?:\/\/[^"']+\.(?:png|jpg|jpeg|webp))["']/i,
+    );
     if (imgMatch && imgMatch[1]) {
       const imgUrl = imgMatch[1].trim();
       const base64 = await fetchImageAsBase64(imgUrl);
@@ -545,4 +659,364 @@ async function scrapeArticleImage(url: string): Promise<string | null> {
     console.warn("Failed to scrape image for URL:", url, e);
   }
   return null;
+}
+
+export async function regenerateSingleDraft(supabase: SupabaseClient, draftId: string) {
+  const apiKey = process.env.API_KEY || "";
+
+  // 1. Fetch current draft
+  const { data: draft, error: fetchErr } = await supabase
+    .from("drafts")
+    .select("*")
+    .eq("id", draftId)
+    .single();
+  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+
+  // 2. Fetch existing drafts for the same run date to avoid duplicate news articles
+  const { data: existingDrafts } = await supabase
+    .from("drafts")
+    .select("url, title")
+    .eq("run_date", draft.run_date);
+
+  const existingUrls = new Set(existingDrafts?.map((d) => d.url).filter(Boolean) ?? []);
+  const existingTitles = new Set(
+    existingDrafts?.map((d) => d.title?.toLowerCase().slice(0, 60)).filter(Boolean) ?? []
+  );
+
+  // 3. Fetch fresh trending news candidates from Google News
+  const queries: Array<{ q: string; topic: "historical" | "academic" }> = [
+    {
+      q: '"manuscript" OR "manuscripts" (ancient OR medieval OR discovered OR auction OR digitization)',
+      topic: "historical",
+    },
+    {
+      q: '"manuscript" (journal OR preprint OR "peer review" OR retraction OR submission)',
+      topic: "academic",
+    },
+  ];
+
+  const rawCandidates: Array<{
+    title: string;
+    source: string;
+    url: string;
+    summary: string;
+    topic: "historical" | "academic";
+    pubDate: string;
+  }> = [];
+
+  for (const { q, topic } of queries) {
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q + " when:1d")}&hl=en-US&gl=US&ceid=US:en`;
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 ManuscriptsDaily/1.0" } });
+      if (res.ok) {
+        const xml = await res.text();
+        rawCandidates.push(...parseRss(xml).map((i) => ({ ...i, topic })));
+      }
+    } catch (e) {
+      console.warn("Failed to fetch RSS for query:", q, e);
+    }
+  }
+
+  // Deduplicate candidates by title key
+  const seen = new Set<string>();
+  const dedupedCandidates = rawCandidates.filter((i) => {
+    const k = i.title.slice(0, 60).toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  // Filter out candidates that exist in today's drafts
+  const freshCandidates = dedupedCandidates.filter((i) => {
+    const titleKey = i.title.toLowerCase().slice(0, 60);
+    return !existingUrls.has(i.url) && !existingTitles.has(titleKey);
+  });
+
+  // Choose the best candidate: match topic if possible, otherwise first available
+  let selectedCandidate = freshCandidates.find((c) => c.topic === draft.topic);
+  if (!selectedCandidate && freshCandidates.length > 0) {
+    selectedCandidate = freshCandidates[0];
+  }
+
+  // Define target article metadata
+  let item = {
+    title: draft.title,
+    source: draft.source || "",
+    url: draft.url || "",
+    summary: draft.summary || "",
+    topic: (draft.topic || "historical") as "historical" | "academic",
+  };
+
+  if (selectedCandidate) {
+    item = {
+      title: selectedCandidate.title,
+      source: selectedCandidate.source,
+      url: selectedCandidate.url,
+      summary: selectedCandidate.summary,
+      topic: selectedCandidate.topic,
+    };
+  }
+
+  // 4. Generate fresh summary using AI
+  let newSummary = item.summary;
+  if (apiKey && item.title) {
+    try {
+      const summaryRes = await fetch(`${AI_URL}/chat/completions`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "google/gemini-3-flash-preview",
+          messages: [
+            {
+              role: "system",
+              content: "You are a human researcher summarizing a news find for a colleague. Write a natural, engaging, and human-written 1-2 sentence summary of the news article (do not copy the headline). Avoid robotic transitions, overly formal phrasing, or AI jargon. Under 200 characters.",
+            },
+            {
+              role: "user",
+              content: `Headline: ${item.title}\nSource: ${item.source}`,
+            },
+          ],
+        }),
+      });
+      if (summaryRes.ok) {
+        const j = (await summaryRes.json()) as { choices: Array<{ message: { content: string } }> };
+        newSummary = j.choices[0].message.content.trim();
+      }
+    } catch (e) {
+      console.warn("Failed to generate summary for candidate, using fallback summary", e);
+    }
+  } else if (!apiKey && selectedCandidate) {
+    newSummary = `A curated update on "${selectedCandidate.title}". This finding highlights new developments in the preservation, study, and digital archiving of historical manuscripts and scholarly research worldwide.`;
+  }
+  item.summary = newSummary || "";
+
+  // 5. Scrape article image and generate new image & caption
+  const scrapedImgUrl = await scrapeArticleImage(item.url);
+  const [image, caption] = await Promise.all([
+    generateImage(apiKey, { ...item, scrapedImgUrl }, draft.rank),
+    generateCaption(apiKey, item),
+  ]);
+
+  // 6. Upload new image to storage
+  const isSvg = image.startsWith("<svg");
+  const path = `${draft.run_date}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}`;
+  const bytes = isSvg
+    ? new TextEncoder().encode(image)
+    : Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
+  const up = await supabase.storage.from("post-images").upload(path, bytes, {
+    contentType: isSvg ? "image/svg+xml" : "image/png",
+    upsert: true,
+  });
+  if (up.error) throw up.error;
+
+  const { data: signed } = await supabase.storage
+    .from("post-images")
+    .createSignedUrl(path, 60 * 60 * 24 * 30);
+
+  // 7. Update draft with new article details and regenerated social post assets
+  const { error: updateErr } = await supabase
+    .from("drafts")
+    .update({
+      title: item.title,
+      source: item.source,
+      url: item.url,
+      summary: item.summary,
+      topic: item.topic,
+      caption: caption.caption,
+      hashtags: caption.hashtags,
+      image_path: path,
+      image_url: signed?.signedUrl ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", draftId);
+
+  if (updateErr) throw updateErr;
+
+  return { ok: true };
+}
+
+export async function regenerateSingleImage(supabase: SupabaseClient, draftId: string) {
+  const apiKey = process.env.API_KEY || "";
+
+  const { data: draft, error: fetchErr } = await supabase
+    .from("drafts")
+    .select("*")
+    .eq("id", draftId)
+    .single();
+  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+
+  const item = {
+    title: draft.title,
+    source: draft.source || "",
+    url: draft.url || "",
+    summary: draft.summary || "",
+    topic: (draft.topic || "historical") as "historical" | "academic",
+  };
+
+  const scrapedImgUrl = await scrapeArticleImage(item.url);
+  const styleSeed = Math.floor(Math.random() * 1000);
+  const image = await generateImage(apiKey, { ...item, scrapedImgUrl }, draft.rank, styleSeed);
+
+  const isSvg = image.startsWith("<svg");
+  const path = `${draft.run_date}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}`;
+  const bytes = isSvg
+    ? new TextEncoder().encode(image)
+    : Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
+  const up = await supabase.storage.from("post-images").upload(path, bytes, {
+    contentType: isSvg ? "image/svg+xml" : "image/png",
+    upsert: true,
+  });
+  if (up.error) throw up.error;
+
+  const { data: signed } = await supabase.storage
+    .from("post-images")
+    .createSignedUrl(path, 60 * 60 * 24 * 30);
+
+  const { error: updateErr } = await supabase
+    .from("drafts")
+    .update({
+      image_path: path,
+      image_url: signed?.signedUrl ?? null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", draftId);
+
+  if (updateErr) throw updateErr;
+
+  return { ok: true, imageUrl: signed?.signedUrl ?? null };
+}
+
+export async function regenerateSingleCaption(supabase: SupabaseClient, draftId: string) {
+  const apiKey = process.env.API_KEY || "";
+
+  const { data: draft, error: fetchErr } = await supabase
+    .from("drafts")
+    .select("*")
+    .eq("id", draftId)
+    .single();
+  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+
+  const item = {
+    title: draft.title,
+    source: draft.source || "",
+    url: draft.url || "",
+    summary: draft.summary || "",
+    topic: (draft.topic || "historical") as "historical" | "academic",
+  };
+
+  let newCaptionText = "";
+  if (!apiKey) {
+    const res = await generateCaption(apiKey, item, draft.caption ?? "");
+    newCaptionText = res.caption;
+  } else {
+    const currentCaption = draft.caption ?? "";
+    const res = await fetch(`${AI_URL}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "google/gemini-3-flash-preview",
+        messages: [
+          {
+            role: "system",
+            content:
+              `You write engaging social captions for a global audience interested in manuscripts (historical and academic). Speak like an enthusiastic human historian or scholar sharing a fascinating update in a natural, conversational tone. Do NOT use typical AI clichés (e.g., 'delve', 'testament', 'exciting news', 'unlocking secrets', 'beckons'). Keep the caption conversational and under 220 characters. Avoid placing emojis or hashtags inside the caption itself. Return strict JSON {"caption":string}. Return only the caption. Generate a completely different caption than this current one: "${currentCaption}". Make sure it has a different phrasing and angle.`,
+          },
+          {
+            role: "user",
+            content: `Headline: ${item.title}\nSource: ${item.source}\nTopic: ${item.topic}\nSummary: ${item.summary}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!res.ok) throw new Error(`Caption gen ${res.status}: ${await res.text()}`);
+    const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const parsed = JSON.parse(json.choices[0].message.content) as { caption: string };
+    newCaptionText = parsed.caption ?? "";
+  }
+
+  const { error: updateErr } = await supabase
+    .from("drafts")
+    .update({
+      caption: newCaptionText,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", draftId);
+
+  if (updateErr) throw updateErr;
+
+  return { ok: true, caption: newCaptionText };
+}
+
+export async function regenerateSingleHashtags(supabase: SupabaseClient, draftId: string) {
+  const apiKey = process.env.API_KEY || "";
+
+  const { data: draft, error: fetchErr } = await supabase
+    .from("drafts")
+    .select("*")
+    .eq("id", draftId)
+    .single();
+  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+
+  const item = {
+    title: draft.title,
+    source: draft.source || "",
+    url: draft.url || "",
+    summary: draft.summary || "",
+    topic: (draft.topic || "historical") as "historical" | "academic",
+  };
+
+  let newHashtags: string[] = [];
+  if (!apiKey) {
+    const isHist = item.topic === "historical";
+    const pool = isHist
+      ? ["manuscripts", "history", "heritage", "ancient", "discovery", "archaeology", "archives", "artifacts", "medieval"]
+      : ["manuscripts", "academic", "research", "science", "journal", "peerreview", "scholarship", "preprint", "studies"];
+
+    const currentList = draft.hashtags ?? [];
+    const currentSet = new Set(currentList.map((h) => h.toLowerCase()));
+    const available = pool.filter((tag) => !currentSet.has(tag.toLowerCase()));
+    const chosen = available.length >= 3 ? available : pool;
+
+    newHashtags = chosen
+      .sort(() => 0.5 - Math.random())
+      .slice(0, Math.min(4, chosen.length));
+  } else {
+    const currentTagsStr = (draft.hashtags ?? []).join(", ");
+    const res = await fetch(`${AI_URL}/chat/completions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "google/gemini-3-flash-preview",
+        messages: [
+          {
+            role: "system",
+            content:
+              `You write engaging social tags for a global audience interested in manuscripts (historical and academic). Return 4-6 highly specific, relevant hashtags in the hashtags array. Return strict JSON {"hashtags":string[]}. Hashtags without # prefix. Generate a completely different set of hashtags than these current ones: ${currentTagsStr}. Do not repeat any of the current hashtags.`,
+          },
+          {
+            role: "user",
+            content: `Headline: ${item.title}\nSource: ${item.source}\nTopic: ${item.topic}\nSummary: ${item.summary}`,
+          },
+        ],
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!res.ok) throw new Error(`Hashtag gen ${res.status}: ${await res.text()}`);
+    const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const parsed = JSON.parse(json.choices[0].message.content) as { hashtags: string[] };
+    newHashtags = (parsed.hashtags ?? []).map((h) => h.replace(/^#/, ""));
+  }
+
+  const { error: updateErr } = await supabase
+    .from("drafts")
+    .update({
+      hashtags: newHashtags,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", draftId);
+
+  if (updateErr) throw updateErr;
+
+  return { ok: true, hashtags: newHashtags };
 }

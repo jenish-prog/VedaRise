@@ -33,7 +33,9 @@ export const exportDraftsXlsx = createServerFn({ method: "POST" })
     ];
     ws.getRow(1).font = { bold: true };
     for (const d of drafts ?? []) {
-      const posted = ((d.post_results ?? []) as Array<{ channel: string; posted_url: string | null }>)
+      const posted = (
+        (d.post_results ?? []) as Array<{ channel: string; posted_url: string | null }>
+      )
         .map((p) => `${p.channel}: ${p.posted_url ?? "-"}`)
         .join("\n");
       ws.addRow({

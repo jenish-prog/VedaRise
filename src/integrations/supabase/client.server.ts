@@ -2,17 +2,17 @@
 // Server-side Supabase client with service role key - bypasses RLS.
 // Use this for admin operations in server functions and server routes only.
 // For user-authenticated queries (with RLS), use the auth middleware instead.
-import { createClient } from '@supabase/supabase-js';
-import type { Database } from './types';
+import { createClient } from "@supabase/supabase-js";
+import type { Database } from "./types";
 
 function isNewSupabaseApiKey(value: string): boolean {
-  return value.startsWith('sb_publishable_') || value.startsWith('sb_secret_');
+  return value.startsWith("sb_publishable_") || value.startsWith("sb_secret_");
 }
 
 function createSupabaseFetch(supabaseKey: string): typeof fetch {
   return (input, init) => {
     const headers = new Headers(
-      typeof Request !== 'undefined' && input instanceof Request ? input.headers : undefined,
+      typeof Request !== "undefined" && input instanceof Request ? input.headers : undefined,
     );
 
     if (init?.headers) {
@@ -20,11 +20,14 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
     }
 
     // New Supabase API keys are opaque strings, not bearer JWTs.
-    if (isNewSupabaseApiKey(supabaseKey) && headers.get('Authorization') === `Bearer ${supabaseKey}`) {
-      headers.delete('Authorization');
+    if (
+      isNewSupabaseApiKey(supabaseKey) &&
+      headers.get("Authorization") === `Bearer ${supabaseKey}`
+    ) {
+      headers.delete("Authorization");
     }
 
-    headers.set('apikey', supabaseKey);
+    headers.set("apikey", supabaseKey);
     return fetch(input, { ...init, headers });
   };
 }
@@ -35,36 +38,37 @@ const mockPostResults: any[] = [];
 
 class MockQueryBuilder {
   private table: string;
-  private op: 'select' | 'insert' | 'update' | 'delete' = 'select';
+  private op: "select" | "insert" | "update" | "delete" = "select";
   private insertData: any = null;
   private updatePatch: any = null;
   private filters: Array<{ col: string; val: any }> = [];
   private orderCol: string | null = null;
   private orderAsc: boolean = true;
+  private isSingle: boolean = false;
 
   constructor(table: string) {
     this.table = table;
   }
 
   select(fields?: string) {
-    this.op = 'select';
+    this.op = "select";
     return this;
   }
 
   insert(data: any) {
-    this.op = 'insert';
+    this.op = "insert";
     this.insertData = data;
     return this;
   }
 
   update(patch: any) {
-    this.op = 'update';
+    this.op = "update";
     this.updatePatch = patch;
     return this;
   }
 
   delete() {
-    this.op = 'delete';
+    this.op = "delete";
     return this;
   }
 
@@ -79,12 +83,17 @@ class MockQueryBuilder {
     return this;
   }
 
+  single() {
+    this.isSingle = true;
+    return this;
+  }
+
   async execute() {
-    if (this.table === 'drafts') {
-      if (this.op === 'select') {
+    if (this.table === "drafts") {
+      if (this.op === "select") {
         let results = [...mockDrafts];
         for (const f of this.filters) {
-          results = results.filter(item => (item as any)[f.col] === f.val);
+          results = results.filter((item) => (item as any)[f.col] === f.val);
         }
         if (this.orderCol) {
           results.sort((a: any, b: any) => {
@@ -95,12 +104,15 @@ class MockQueryBuilder {
             return 0;
           });
         }
-        const mapped = results.map(d => ({
+        const mapped = results.map((d) => ({
           ...d,
-          post_results: mockPostResults.filter(p => p.draft_id === d.id)
+          post_results: mockPostResults.filter((p) => p.draft_id === d.id),
         }));
+        if (this.isSingle) {
+          return { data: mapped[0] || null, error: mapped[0] ? null : { message: "Row not found" } };
+        }
         return { data: mapped, error: null };
-      } else if (this.op === 'insert') {
+      } else if (this.op === "insert") {
         const items = Array.isArray(this.insertData) ? this.insertData : [this.insertData];
         const inserted: any[] = [];
         for (const item of items) {
@@ -108,17 +120,17 @@ class MockQueryBuilder {
             id: item.id || crypto.randomUUID(),
             run_date: item.run_date || new Date().toISOString().slice(0, 10),
             rank: item.rank || 1,
-            title: item.title || '',
+            title: item.title || "",
             source: item.source || null,
             url: item.url || null,
             summary: item.summary || null,
-            topic: item.topic || 'historical',
+            topic: item.topic || "historical",
             image_url: item.image_url || null,
             image_path: item.image_path || null,
             caption: item.caption || null,
             hashtags: item.hashtags || [],
             channels: item.channels || { linkedin: true, x: true, facebook: true, instagram: true },
-            status: item.status || 'pending',
+            status: item.status || "pending",
             created_at: new Date().toISOString(),
             updated_at: new Date().toISOString(),
             approved_at: null,
@@ -128,16 +140,16 @@ class MockQueryBuilder {
           inserted.push(newDraft);
         }
         return { data: Array.isArray(this.insertData) ? inserted : inserted[0], error: null };
-      } else if (this.op === 'update') {
+      } else if (this.op === "update") {
         let targets = [...mockDrafts];
         for (const f of this.filters) {
-          targets = targets.filter(item => (item as any)[f.col] === f.val);
+          targets = targets.filter((item) => (item as any)[f.col] === f.val);
         }
         for (const target of targets) {
           Object.assign(target, this.updatePatch, { updated_at: new Date().toISOString() });
         }
         return { data: targets, error: null };
-      } else if (this.op === 'delete') {
+      } else if (this.op === "delete") {
         const toDelete = new Set<string>();
         for (const item of mockDrafts) {
           let matches = true;
@@ -156,14 +168,14 @@ class MockQueryBuilder {
         }
         return { data: null, error: null };
       }
-    } else if (this.table === 'post_results') {
-      if (this.op === 'select') {
+    } else if (this.table === "post_results") {
+      if (this.op === "select") {
         let results = [...mockPostResults];
         for (const f of this.filters) {
-          results = results.filter(item => (item as any)[f.col] === f.val);
+          results = results.filter((item) => (item as any)[f.col] === f.val);
         }
         return { data: results, error: null };
-      } else if (this.op === 'insert') {
+      } else if (this.op === "insert") {
         const items = Array.isArray(this.insertData) ? this.insertData : [this.insertData];
         const inserted: any[] = [];
         for (const item of items) {
@@ -174,7 +186,7 @@ class MockQueryBuilder {
             status: item.status,
             posted_url: item.posted_url || null,
             error: item.error || null,
-            posted_at: new Date().toISOString()
+            posted_at: new Date().toISOString(),
           };
           mockPostResults.push(res);
           inserted.push(res);
@@ -198,40 +210,41 @@ const mockStorage = {
       async upload(path: string, bytes: any, options: any) {
         mockStorageFiles.set(path, {
           bytes,
-          contentType: options?.contentType || 'image/png'
+          contentType: options?.contentType || "image/png",
         });
         return { data: { path }, error: null };
       },
       async createSignedUrl(path: string, expiry: number) {
         const file = mockStorageFiles.get(path);
         if (file) {
-          if (file.contentType === 'image/svg+xml') {
+          if (file.contentType === "image/svg+xml") {
             const svgText = new TextDecoder().decode(file.bytes);
-            const base64Svg = Buffer.from(svgText).toString('base64');
+            const base64Svg = Buffer.from(svgText).toString("base64");
             return {
               data: {
-                signedUrl: `data:image/svg+xml;base64,${base64Svg}`
+                signedUrl: `data:image/svg+xml;base64,${base64Svg}`,
               },
-              error: null
+              error: null,
             };
           }
         }
         return {
           data: {
-            signedUrl: "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&w=600&q=80"
+            signedUrl:
+              "https://images.unsplash.com/photo-1544947950-fa07a98d237f?auto=format&fit=crop&w=600&q=80",
           },
-          error: null
+          error: null,
         };
-      }
+      },
     };
-  }
+  },
 };
 
 const mockSupabaseClient = {
   from(table: string) {
     return new MockQueryBuilder(table);
   },
-  storage: mockStorage
+  storage: mockStorage,
 };
 
 function createSupabaseAdminClient() {
@@ -239,7 +252,9 @@ function createSupabaseAdminClient() {
   const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    console.warn("[Supabase] Missing SUPABASE_SERVICE_ROLE_KEY or SUPABASE_URL. Using in-memory mock client.");
+    console.warn(
+      "[Supabase] Missing SUPABASE_SERVICE_ROLE_KEY or SUPABASE_URL. Using in-memory mock client.",
+    );
     return mockSupabaseClient as any;
   }
 
@@ -251,7 +266,7 @@ function createSupabaseAdminClient() {
       storage: undefined,
       persistSession: false,
       autoRefreshToken: false,
-    }
+    },
   });
 }
 

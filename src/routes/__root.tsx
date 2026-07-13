@@ -78,9 +78,16 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "Manuscripts Daily — Auto Social Posts" },
-      { name: "description", content: "Daily top-5 manuscripts news, AI-generated images and captions, one-click approval to LinkedIn, X, Facebook and Instagram." },
+      {
+        name: "description",
+        content:
+          "Daily top-5 manuscripts news, AI-generated images and captions, one-click approval to LinkedIn, X, Facebook and Instagram.",
+      },
       { property: "og:title", content: "Manuscripts Daily" },
-      { property: "og:description", content: "Daily manuscripts news → AI image + caption → approve → auto-post." },
+      {
+        property: "og:description",
+        content: "Daily manuscripts news → AI image + caption → approve → auto-post.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
     ],
