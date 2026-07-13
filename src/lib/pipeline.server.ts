@@ -1,4 +1,3 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { GoogleDecoder } from "google-news-url-decoder";
 
 const googleDecoder = new GoogleDecoder();
@@ -12,19 +11,97 @@ type NewsItem = {
   scrapedImgUrl?: string | null;
 };
 
+export function getTitleSignature(title: string): string {
+  const parts = title.split(/\s+[-|–—•]\s+/);
+  const headline = parts[0] || title;
+  return headline
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .slice(0, 100);
+}
+
+export function getUrlSignature(url: string): string {
+  if (url.includes("news.google.com")) {
+    const match = url.match(/\/articles\/([a-zA-Z0-9_-]+)/);
+    if (match && match[1]) {
+      return match[1];
+    }
+  }
+  let clean = url.split("?")[0].split("#")[0].toLowerCase().trim();
+  if (clean.endsWith("/")) {
+    clean = clean.slice(0, -1);
+  }
+  return clean;
+}
+
 const AI_URL = "https://ai.gateway.lovable.dev/v1";
 
-export async function runPipeline(supabase: SupabaseClient) {
+const BACKUP_CANDIDATES: Array<{
+  title: string;
+  source: string;
+  url: string;
+  summary: string;
+  topic: "historical" | "academic";
+  pubDate: string;
+}> = [
+  {
+    title: "15th-Century Illuminated Manuscript Digitized by Vatican Library",
+    source: "Vatican News",
+    url: "https://vaticannews.va/en/illuminated-manuscript-digitization-2026",
+    summary: "The Vatican Library has completed the high-resolution digitization of a rare 15th-century French book of hours, making it public.",
+    topic: "historical",
+    pubDate: "2026-07-13",
+  },
+  {
+    title: "New Study Reveals Scribes Shared Workshops in Medieval London",
+    source: "Medieval Archaeologist",
+    url: "https://medievalarchaeology.org/scribes-london-workshops-study",
+    summary: "An analysis of handwriting patterns suggests that secular scribes in 14th-century London shared workshops and collaborated on major poetic works.",
+    topic: "historical",
+    pubDate: "2026-07-13",
+  },
+  {
+    title: "Scribal Errors in Bible Manuscripts Provide Clues to Early Dialects",
+    source: "Journal of Biblical Literature",
+    url: "https://jbl.org/scribal-errors-bible-manuscripts-dialects",
+    summary: "Researchers studying orthographic variations in early Greek manuscripts have mapped the regional dialects of the copyists.",
+    topic: "academic",
+    pubDate: "2026-07-13",
+  },
+  {
+    title: "AI Restores Carbonized Scrolls from Herculaneum Library",
+    source: "Tech Science Daily",
+    url: "https://techscidaily.com/ai-restores-carbonized-scrolls-herculaneum",
+    summary: "Using advanced 3D X-ray scans and deep learning algorithms, scientists have successfully read passages from a rolled-up carbonized scroll.",
+    topic: "academic",
+    pubDate: "2026-07-13",
+  },
+  {
+    title: "Lost Fragment of Arthurian Legend Discovered in Binding of Old Book",
+    source: "Manuscripts Monthly",
+    url: "https://manuscriptsmonthly.com/lost-fragment-arthurian-legend-binding",
+    summary: "A parchment strip containing lines from a French romance about Sir Lancelot was recovered from the binding of a 16th-century ledger.",
+    topic: "historical",
+    pubDate: "2026-07-13",
+  },
+];
+
+export async function runPipeline(supabase?: any) {
   const apiKey = process.env.API_KEY || "";
   if (!apiKey) {
     console.warn("AI is not configured. Running pipeline with mock generations.");
   }
 
-  const items = await fetchTrendingNews();
+  const { mysqlQuery } = await import("@/integrations/mysql/client.server");
   const runDate = new Date().toISOString().slice(0, 10);
 
-  // Clear any pending drafts for today so a re-run replaces them.
-  await supabase.from("drafts").delete().eq("run_date", runDate).eq("status", "pending");
+  // Guard: Check if drafts for today already exist in the database
+  const existingToday = await mysqlQuery<any[]>("SELECT id FROM drafts WHERE run_date = ?", [runDate]);
+  if (existingToday.length > 0) {
+    throw new Error("Today's drafts have already been generated.");
+  }
+
+  const items = await fetchTrendingNews();
 
   const results: Array<{ ok: boolean; title: string; error?: string }> = [];
 
@@ -37,36 +114,37 @@ export async function runPipeline(supabase: SupabaseClient) {
         generateCaption(apiKey, item),
       ]);
 
-      // Upload PNG/SVG to storage
       const isSvg = image.startsWith("<svg");
       const path = `${runDate}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}`;
-      const bytes = isSvg
-        ? new TextEncoder().encode(image)
-        : Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
-      const up = await supabase.storage.from("post-images").upload(path, bytes, {
-        contentType: isSvg ? "image/svg+xml" : "image/png",
-        upsert: true,
-      });
-      if (up.error) throw up.error;
+      
+      let imageUrl = "";
+      if (isSvg) {
+        imageUrl = `data:image/svg+xml;base64,${Buffer.from(image).toString("base64")}`;
+      } else {
+        imageUrl = `data:image/png;base64,${image}`;
+      }
 
-      const { data: signed } = await supabase.storage
-        .from("post-images")
-        .createSignedUrl(path, 60 * 60 * 24 * 30);
-
-      const { error } = await supabase.from("drafts").insert({
-        run_date: runDate,
-        rank: i + 1,
-        title: item.title,
-        source: item.source,
-        url: item.url,
-        summary: item.summary,
-        topic: item.topic,
-        image_path: path,
-        image_url: signed?.signedUrl ?? null,
-        caption: caption.caption,
-        hashtags: caption.hashtags,
-      });
-      if (error) throw error;
+      const draftId = crypto.randomUUID();
+      await mysqlQuery(
+        "INSERT INTO drafts (id, run_date, `rank`, title, source, url, summary, topic, image_path, image_url, caption, hashtags, channels, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [
+          draftId,
+          runDate,
+          i + 1,
+          item.title,
+          item.source,
+          item.url,
+          item.summary,
+          item.topic,
+          path,
+          imageUrl,
+          caption.caption,
+          JSON.stringify(caption.hashtags),
+          JSON.stringify({ linkedin: true, x: true, facebook: true, instagram: true }),
+          "pending",
+        ]
+      );
+      
       results.push({ ok: true, title: item.title });
     } catch (err) {
       results.push({
@@ -113,11 +191,14 @@ async function fetchTrendingNews(): Promise<NewsItem[]> {
   if (raw.length === 0) throw new Error("No news items found from Google News right now.");
 
   // Dedupe by title (case-insensitive first 60 chars)
-  const seen = new Set<string>();
+  const seenUrls = new Set<string>();
+  const seenTitles = new Set<string>();
   const deduped = raw.filter((i) => {
-    const k = i.title.slice(0, 60).toLowerCase();
-    if (seen.has(k)) return false;
-    seen.add(k);
+    const urlSig = getUrlSignature(i.url);
+    const titleSig = getTitleSignature(i.title);
+    if (seenUrls.has(urlSig) || seenTitles.has(titleSig)) return false;
+    seenUrls.add(urlSig);
+    seenTitles.add(titleSig);
     return true;
   });
 
@@ -353,11 +434,11 @@ async function generateCaption(
   };
   return {
     caption: parsed.caption ?? "",
-    hashtags: (parsed.hashtags ?? []).map((h) => h.replace(/^#/, "")),
+    hashtags: (parsed.hashtags ?? []).map((h: string) => h.replace(/^#/, "")),
   };
 }
 
-function generateSvgImage(item: NewsItem, rank: number): string {
+function generateSvgImage(item: NewsItem, rank: number, styleSeed?: number): string {
   const hasImage = !!item.scrapedImgUrl;
   const firstLetter = item.title.trim().charAt(0).toUpperCase() || "M";
 
@@ -376,7 +457,7 @@ function generateSvgImage(item: NewsItem, rank: number): string {
   const width = 1080;
   const height = 1080;
 
-  const styleIndex = (rank - 1) % 4;
+  const styleIndex = styleSeed !== undefined ? (styleSeed % 4) : ((rank - 1) % 4);
 
   let bgGrad = "";
   let titleColor = "";
@@ -661,27 +742,36 @@ async function scrapeArticleImage(url: string): Promise<string | null> {
   return null;
 }
 
-export async function regenerateSingleDraft(supabase: SupabaseClient, draftId: string) {
+export async function regenerateSingleDraft(draftId: string) {
   const apiKey = process.env.API_KEY || "";
 
+  const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+
   // 1. Fetch current draft
-  const { data: draft, error: fetchErr } = await supabase
-    .from("drafts")
-    .select("*")
-    .eq("id", draftId)
-    .single();
-  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+  const drafts = await mysqlQuery<any[]>("SELECT * FROM drafts WHERE id = ?", [draftId]);
+  const draft = drafts[0];
+  if (!draft) throw new Error("Draft not found");
 
-  // 2. Fetch existing drafts for the same run date to avoid duplicate news articles
-  const { data: existingDrafts } = await supabase
-    .from("drafts")
-    .select("url, title")
-    .eq("run_date", draft.run_date);
+  // Format run_date safely as timezone-independent YYYY-MM-DD string
+  const runDateStr = draft.run_date instanceof Date
+    ? draft.run_date.toISOString().slice(0, 10)
+    : String(draft.run_date).slice(0, 10);
 
-  const existingUrls = new Set(existingDrafts?.map((d) => d.url).filter(Boolean) ?? []);
-  const existingTitles = new Set(
-    existingDrafts?.map((d) => d.title?.toLowerCase().slice(0, 60)).filter(Boolean) ?? []
+  // 2. Fetch all other drafts for the same run date (excluding the card being regenerated)
+  // this represents the set of displayedArticles for the other cards
+  const otherDrafts = await mysqlQuery<any[]>(
+    "SELECT url, title FROM drafts WHERE run_date = ? AND id != ?",
+    [runDateStr, draftId]
   );
+
+  const displayedUrls = new Set(otherDrafts?.map((d) => getUrlSignature(d.url)).filter(Boolean) ?? []);
+  const displayedTitles = new Set(
+    otherDrafts?.map((d) => getTitleSignature(d.title)).filter(Boolean) ?? []
+  );
+
+  // Exclude the current card's article URL & title signature to force a replacement
+  const currentUrlSig = getUrlSignature(draft.url);
+  const currentTitleSig = getTitleSignature(draft.title);
 
   // 3. Fetch fresh trending news candidates from Google News
   const queries: Array<{ q: string; topic: "historical" | "academic" }> = [
@@ -705,7 +795,7 @@ export async function regenerateSingleDraft(supabase: SupabaseClient, draftId: s
   }> = [];
 
   for (const { q, topic } of queries) {
-    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q + " when:1d")}&hl=en-US&gl=US&ceid=US:en`;
+    const url = `https://news.google.com/rss/search?q=${encodeURIComponent(q)}&hl=en-US&gl=US&ceid=US:en`;
     try {
       const res = await fetch(url, { headers: { "User-Agent": "Mozilla/5.0 ManuscriptsDaily/1.0" } });
       if (res.ok) {
@@ -717,20 +807,49 @@ export async function regenerateSingleDraft(supabase: SupabaseClient, draftId: s
     }
   }
 
-  // Deduplicate candidates by title key
-  const seen = new Set<string>();
+  // Deduplicate candidates by signature
+  const seenUrls = new Set<string>();
+  const seenTitles = new Set<string>();
   const dedupedCandidates = rawCandidates.filter((i) => {
-    const k = i.title.slice(0, 60).toLowerCase();
-    if (seen.has(k)) return false;
-    seen.add(k);
+    const urlSig = getUrlSignature(i.url);
+    const titleSig = getTitleSignature(i.title);
+    if (seenUrls.has(urlSig) || seenTitles.has(titleSig)) return false;
+    seenUrls.add(urlSig);
+    seenTitles.add(titleSig);
     return true;
   });
 
-  // Filter out candidates that exist in today's drafts
-  const freshCandidates = dedupedCandidates.filter((i) => {
-    const titleKey = i.title.toLowerCase().slice(0, 60);
-    return !existingUrls.has(i.url) && !existingTitles.has(titleKey);
+  // Filter out candidates that are currently displayed in other cards or match the current card
+  let freshCandidates = dedupedCandidates.filter((i) => {
+    const urlSig = getUrlSignature(i.url);
+    const titleSig = getTitleSignature(i.title);
+    return (
+      !displayedUrls.has(urlSig) &&
+      !displayedTitles.has(titleSig) &&
+      urlSig !== currentUrlSig &&
+      titleSig !== currentTitleSig
+    );
   });
+
+  // Fallback to backup pool if no fresh RSS candidates are found
+  if (freshCandidates.length === 0) {
+    const backups = BACKUP_CANDIDATES.filter((i) => {
+      const urlSig = getUrlSignature(i.url);
+      const titleSig = getTitleSignature(i.title);
+      return (
+        !displayedUrls.has(urlSig) &&
+        !displayedTitles.has(titleSig) &&
+        urlSig !== currentUrlSig &&
+        titleSig !== currentTitleSig
+      );
+    });
+    freshCandidates = backups;
+  }
+
+  // If no more unique articles are available for this date, throw a clean user-facing error
+  if (freshCandidates.length === 0) {
+    throw new Error("No more unique articles available for this date");
+  }
 
   // Choose the best candidate: match topic if possible, otherwise first available
   let selectedCandidate = freshCandidates.find((c) => c.topic === draft.topic);
@@ -738,24 +857,18 @@ export async function regenerateSingleDraft(supabase: SupabaseClient, draftId: s
     selectedCandidate = freshCandidates[0];
   }
 
+  if (!selectedCandidate) {
+    throw new Error("No more unique articles available for this date");
+  }
+
   // Define target article metadata
   let item = {
-    title: draft.title,
-    source: draft.source || "",
-    url: draft.url || "",
-    summary: draft.summary || "",
-    topic: (draft.topic || "historical") as "historical" | "academic",
+    title: selectedCandidate.title,
+    source: selectedCandidate.source,
+    url: selectedCandidate.url,
+    summary: selectedCandidate.summary,
+    topic: selectedCandidate.topic,
   };
-
-  if (selectedCandidate) {
-    item = {
-      title: selectedCandidate.title,
-      source: selectedCandidate.source,
-      url: selectedCandidate.url,
-      summary: selectedCandidate.summary,
-      topic: selectedCandidate.topic,
-    };
-  }
 
   // 4. Generate fresh summary using AI
   let newSummary = item.summary;
@@ -797,53 +910,43 @@ export async function regenerateSingleDraft(supabase: SupabaseClient, draftId: s
     generateCaption(apiKey, item),
   ]);
 
-  // 6. Upload new image to storage
   const isSvg = image.startsWith("<svg");
   const path = `${draft.run_date}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}`;
-  const bytes = isSvg
-    ? new TextEncoder().encode(image)
-    : Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
-  const up = await supabase.storage.from("post-images").upload(path, bytes, {
-    contentType: isSvg ? "image/svg+xml" : "image/png",
-    upsert: true,
-  });
-  if (up.error) throw up.error;
-
-  const { data: signed } = await supabase.storage
-    .from("post-images")
-    .createSignedUrl(path, 60 * 60 * 24 * 30);
+  
+  let imageUrl = "";
+  if (isSvg) {
+    imageUrl = `data:image/svg+xml;base64,${Buffer.from(image).toString("base64")}`;
+  } else {
+    imageUrl = `data:image/png;base64,${image}`;
+  }
 
   // 7. Update draft with new article details and regenerated social post assets
-  const { error: updateErr } = await supabase
-    .from("drafts")
-    .update({
-      title: item.title,
-      source: item.source,
-      url: item.url,
-      summary: item.summary,
-      topic: item.topic,
-      caption: caption.caption,
-      hashtags: caption.hashtags,
-      image_path: path,
-      image_url: signed?.signedUrl ?? null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", draftId);
-
-  if (updateErr) throw updateErr;
+  await mysqlQuery(
+    "UPDATE drafts SET title = ?, source = ?, url = ?, summary = ?, topic = ?, caption = ?, hashtags = ?, image_path = ?, image_url = ?, updated_at = NOW() WHERE id = ?",
+    [
+      item.title,
+      item.source,
+      item.url,
+      item.summary,
+      item.topic,
+      caption.caption,
+      JSON.stringify(caption.hashtags),
+      path,
+      imageUrl,
+      draftId,
+    ]
+  );
 
   return { ok: true };
 }
 
-export async function regenerateSingleImage(supabase: SupabaseClient, draftId: string) {
+export async function regenerateSingleImage(draftId: string) {
   const apiKey = process.env.API_KEY || "";
 
-  const { data: draft, error: fetchErr } = await supabase
-    .from("drafts")
-    .select("*")
-    .eq("id", draftId)
-    .single();
-  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+  const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+  const drafts = await mysqlQuery<any[]>("SELECT * FROM drafts WHERE id = ?", [draftId]);
+  const draft = drafts[0];
+  if (!draft) throw new Error("Draft not found");
 
   const item = {
     title: draft.title,
@@ -854,47 +957,37 @@ export async function regenerateSingleImage(supabase: SupabaseClient, draftId: s
   };
 
   const scrapedImgUrl = await scrapeArticleImage(item.url);
-  const styleSeed = Math.floor(Math.random() * 1000);
-  const image = await generateImage(apiKey, { ...item, scrapedImgUrl }, draft.rank, styleSeed);
+  const match = draft.image_path ? draft.image_path.match(/[?&]style=(\d+)/) : null;
+  const currentStyle = match ? parseInt(match[1], 10) : ((draft.rank - 1) % 4);
+  const newStyle = (currentStyle + 1) % 4;
+
+  const image = await generateImage(apiKey, { ...item, scrapedImgUrl }, draft.rank, newStyle);
 
   const isSvg = image.startsWith("<svg");
-  const path = `${draft.run_date}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}`;
-  const bytes = isSvg
-    ? new TextEncoder().encode(image)
-    : Uint8Array.from(atob(image), (c) => c.charCodeAt(0));
-  const up = await supabase.storage.from("post-images").upload(path, bytes, {
-    contentType: isSvg ? "image/svg+xml" : "image/png",
-    upsert: true,
-  });
-  if (up.error) throw up.error;
+  const path = `${draft.run_date}/${crypto.randomUUID()}.${isSvg ? "svg" : "png"}?style=${newStyle}`;
+  
+  let imageUrl = "";
+  if (isSvg) {
+    imageUrl = `data:image/svg+xml;base64,${Buffer.from(image).toString("base64")}`;
+  } else {
+    imageUrl = `data:image/png;base64,${image}`;
+  }
 
-  const { data: signed } = await supabase.storage
-    .from("post-images")
-    .createSignedUrl(path, 60 * 60 * 24 * 30);
+  await mysqlQuery(
+    "UPDATE drafts SET image_path = ?, image_url = ?, updated_at = NOW() WHERE id = ?",
+    [path, imageUrl, draftId]
+  );
 
-  const { error: updateErr } = await supabase
-    .from("drafts")
-    .update({
-      image_path: path,
-      image_url: signed?.signedUrl ?? null,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", draftId);
-
-  if (updateErr) throw updateErr;
-
-  return { ok: true, imageUrl: signed?.signedUrl ?? null };
+  return { ok: true, imageUrl };
 }
 
-export async function regenerateSingleCaption(supabase: SupabaseClient, draftId: string) {
+export async function regenerateSingleCaption(draftId: string) {
   const apiKey = process.env.API_KEY || "";
 
-  const { data: draft, error: fetchErr } = await supabase
-    .from("drafts")
-    .select("*")
-    .eq("id", draftId)
-    .single();
-  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+  const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+  const drafts = await mysqlQuery<any[]>("SELECT * FROM drafts WHERE id = ?", [draftId]);
+  const draft = drafts[0];
+  if (!draft) throw new Error("Draft not found");
 
   const item = {
     title: draft.title,
@@ -935,28 +1028,21 @@ export async function regenerateSingleCaption(supabase: SupabaseClient, draftId:
     newCaptionText = parsed.caption ?? "";
   }
 
-  const { error: updateErr } = await supabase
-    .from("drafts")
-    .update({
-      caption: newCaptionText,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", draftId);
-
-  if (updateErr) throw updateErr;
+  await mysqlQuery(
+    "UPDATE drafts SET caption = ?, updated_at = NOW() WHERE id = ?",
+    [newCaptionText, draftId]
+  );
 
   return { ok: true, caption: newCaptionText };
 }
 
-export async function regenerateSingleHashtags(supabase: SupabaseClient, draftId: string) {
+export async function regenerateSingleHashtags(draftId: string) {
   const apiKey = process.env.API_KEY || "";
 
-  const { data: draft, error: fetchErr } = await supabase
-    .from("drafts")
-    .select("*")
-    .eq("id", draftId)
-    .single();
-  if (fetchErr || !draft) throw new Error(fetchErr?.message ?? "Draft not found");
+  const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+  const drafts = await mysqlQuery<any[]>("SELECT * FROM drafts WHERE id = ?", [draftId]);
+  const draft = drafts[0];
+  if (!draft) throw new Error("Draft not found");
 
   const item = {
     title: draft.title,
@@ -974,7 +1060,7 @@ export async function regenerateSingleHashtags(supabase: SupabaseClient, draftId
       : ["manuscripts", "academic", "research", "science", "journal", "peerreview", "scholarship", "preprint", "studies"];
 
     const currentList = draft.hashtags ?? [];
-    const currentSet = new Set(currentList.map((h) => h.toLowerCase()));
+    const currentSet = new Set(currentList.map((h: string) => h.toLowerCase()));
     const available = pool.filter((tag) => !currentSet.has(tag.toLowerCase()));
     const chosen = available.length >= 3 ? available : pool;
 
@@ -1005,18 +1091,13 @@ export async function regenerateSingleHashtags(supabase: SupabaseClient, draftId
     if (!res.ok) throw new Error(`Hashtag gen ${res.status}: ${await res.text()}`);
     const json = (await res.json()) as { choices: Array<{ message: { content: string } }> };
     const parsed = JSON.parse(json.choices[0].message.content) as { hashtags: string[] };
-    newHashtags = (parsed.hashtags ?? []).map((h) => h.replace(/^#/, ""));
+    newHashtags = (parsed.hashtags ?? []).map((h: string) => h.replace(/^#/, ""));
   }
 
-  const { error: updateErr } = await supabase
-    .from("drafts")
-    .update({
-      hashtags: newHashtags,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", draftId);
-
-  if (updateErr) throw updateErr;
+  await mysqlQuery(
+    "UPDATE drafts SET hashtags = ?, updated_at = NOW() WHERE id = ?",
+    [JSON.stringify(newHashtags), draftId]
+  );
 
   return { ok: true, hashtags: newHashtags };
 }

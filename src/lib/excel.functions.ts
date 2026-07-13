@@ -6,14 +6,26 @@ export const exportDraftsXlsx = createServerFn({ method: "POST" })
     z.object({ runDate: z.string().optional() }).parse(input ?? {}),
   )
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { mysqlQuery } = await import("@/integrations/mysql/client.server");
     const date = data.runDate ?? new Date().toISOString().slice(0, 10);
-    const { data: drafts, error } = await supabaseAdmin
-      .from("drafts")
-      .select("*, post_results(*)")
-      .eq("run_date", date)
-      .order("rank", { ascending: true });
-    if (error) throw new Error(error.message);
+    
+    const drafts = await mysqlQuery<any[]>(
+      "SELECT * FROM drafts WHERE run_date = ? ORDER BY `rank` ASC",
+      [date]
+    );
+
+    if (drafts.length > 0) {
+      const draftIds = drafts.map((d) => d.id);
+      const placeholders = draftIds.map(() => "?").join(",");
+      const results = await mysqlQuery<any[]>(
+        `SELECT * FROM post_results WHERE draft_id IN (${placeholders})`,
+        draftIds
+      );
+
+      for (const d of drafts) {
+        d.post_results = results.filter((r) => r.draft_id === d.id);
+      }
+    }
 
     const ExcelJS = (await import("exceljs")).default;
     const wb = new ExcelJS.Workbook();

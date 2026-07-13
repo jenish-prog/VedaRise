@@ -1,14 +1,12 @@
-import type { SupabaseClient } from "@supabase/supabase-js";
+import crypto from "crypto";
 
 type Channel = "linkedin" | "x" | "facebook" | "instagram" | "website";
 
-export async function postDraft(supabase: SupabaseClient, draftId: string, overrideChannels?: Record<string, boolean>) {
-  const { data: draft, error } = await supabase
-    .from("drafts")
-    .select("*")
-    .eq("id", draftId)
-    .single();
-  if (error || !draft) throw new Error(error?.message ?? "Draft not found");
+export async function postDraft(draftId: string, overrideChannels?: Record<string, boolean>) {
+  const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+  const drafts = await mysqlQuery<any[]>("SELECT * FROM drafts WHERE id = ?", [draftId]);
+  const draft = drafts[0];
+  if (!draft) throw new Error("Draft not found");
 
   let channels = (overrideChannels || draft.channels) as Record<string, boolean>;
   const results: Array<{ channel: Channel; ok: boolean; url?: string; error?: string }> = [];
@@ -19,33 +17,26 @@ export async function postDraft(supabase: SupabaseClient, draftId: string, overr
     try {
       const url = await postToChannel(ch, draft);
       results.push({ channel: ch, ok: true, url });
-      await supabase.from("post_results").insert({
-        draft_id: draftId,
-        channel: ch,
-        status: "success",
-        posted_url: url,
-      });
+      await mysqlQuery(
+        "INSERT INTO post_results (id, draft_id, channel, status, posted_url, error) VALUES (?, ?, ?, ?, ?, ?)",
+        [crypto.randomUUID(), draftId, ch, "success", url, null]
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       results.push({ channel: ch, ok: false, error: msg });
-      await supabase.from("post_results").insert({
-        draft_id: draftId,
-        channel: ch,
-        status: "failed",
-        error: msg,
-      });
+      await mysqlQuery(
+        "INSERT INTO post_results (id, draft_id, channel, status, posted_url, error) VALUES (?, ?, ?, ?, ?, ?)",
+        [crypto.randomUUID(), draftId, ch, "failed", null, msg]
+      );
     }
   }
 
   const anyOk = results.some((r) => r.ok);
   const allOk = results.length > 0 && results.every((r) => r.ok);
-  await supabase
-    .from("drafts")
-    .update({
-      status: allOk ? "posted" : anyOk ? "posted" : "failed",
-      approved_at: new Date().toISOString(),
-    })
-    .eq("id", draftId);
+  await mysqlQuery(
+    "UPDATE drafts SET status = ?, approved_at = NOW(), updated_at = NOW() WHERE id = ?",
+    [allOk ? "posted" : anyOk ? "posted" : "failed", draftId]
+  );
 
   return { results };
 }
@@ -55,7 +46,7 @@ async function postToChannel(
   draft: any,
 ): Promise<string> {
   const body =
-    `${draft.caption ?? ""}\n\n${(draft.hashtags ?? []).map((h) => `#${h}`).join(" ")}${draft.url ? `\n\n${draft.url}` : ""}`.trim();
+    `${draft.caption ?? ""}\n\n${(draft.hashtags ?? []).map((h: string) => `#${h}`).join(" ")}${draft.url ? `\n\n${draft.url}` : ""}`.trim();
 
   if (channel === "linkedin") return postLinkedIn(body);
   if (channel === "x") return postX(body);

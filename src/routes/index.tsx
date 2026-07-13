@@ -90,7 +90,7 @@ function Dashboard() {
             >
               <Download className="mr-2 h-4 w-4" /> Excel
             </Button>
-            <Button size="sm" onClick={() => runMut.mutate()} disabled={runMut.isPending}>
+            <Button size="sm" onClick={() => runMut.mutate()} disabled={runMut.isPending || drafts.length > 0}>
               {runMut.isPending ? (
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
               ) : (
@@ -194,6 +194,7 @@ function DraftCard({ draft }: { draft: Draft }) {
     setEditSummary(draft.summary ?? "");
     setCaption(draft.caption ?? "");
     setHashtags((draft.hashtags ?? []).map((h) => `#${h}`).join(" "));
+    setDirty(false);
   }, [draft.title, draft.summary, draft.caption, draft.hashtags]);
 
   useEffect(() => {
@@ -490,17 +491,24 @@ function DraftCard({ draft }: { draft: Draft }) {
                     )}
                   </Button>
                 </div>
-                {draft.image_url ? (
-                  <img
-                    src={draft.image_url}
-                    alt=""
-                    className="aspect-square w-full rounded-md border border-border object-cover"
-                  />
-                ) : (
-                  <div className="flex aspect-square w-full items-center justify-center rounded-md border border-border bg-muted">
-                    <ImageIcon className="h-8 w-8 text-muted-foreground" />
-                  </div>
-                )}
+                <div className="relative aspect-square w-full rounded-md border border-border overflow-hidden">
+                  {draft.image_url ? (
+                    <img
+                      src={draft.image_url}
+                      alt=""
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="flex w-full h-full items-center justify-center bg-muted">
+                      <ImageIcon className="h-8 w-8 text-muted-foreground" />
+                    </div>
+                  )}
+                  {regenerateImageMut.isPending && (
+                    <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-xs">
+                      <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                    </div>
+                  )}
+                </div>
               </div>
 
               <div className="space-y-3">
@@ -525,16 +533,23 @@ function DraftCard({ draft }: { draft: Draft }) {
                       )}
                     </Button>
                   </div>
-                  <Textarea
-                    value={caption}
-                    onChange={(e) => {
-                      setCaption(e.target.value);
-                      setDirty(true);
-                    }}
-                    rows={4}
-                    className="resize-none"
-                    disabled={disabled}
-                  />
+                  <div className="relative">
+                    <Textarea
+                      value={caption}
+                      onChange={(e) => {
+                        setCaption(e.target.value);
+                        setDirty(true);
+                      }}
+                      rows={4}
+                      className="resize-none"
+                      disabled={disabled || regenerateCaptionMut.isPending}
+                    />
+                    {regenerateCaptionMut.isPending && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-xs rounded-md">
+                        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between">
@@ -557,14 +572,21 @@ function DraftCard({ draft }: { draft: Draft }) {
                       )}
                     </Button>
                   </div>
-                  <Input
-                    value={hashtags}
-                    onChange={(e) => {
-                      setHashtags(e.target.value);
-                      setDirty(true);
-                    }}
-                    disabled={disabled}
-                  />
+                  <div className="relative">
+                    <Input
+                      value={hashtags}
+                      onChange={(e) => {
+                        setHashtags(e.target.value);
+                        setDirty(true);
+                      }}
+                      disabled={disabled || regenerateHashtagsMut.isPending}
+                    />
+                    {regenerateHashtagsMut.isPending && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-background/60 backdrop-blur-xs rounded-md">
+                        <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -621,7 +643,7 @@ function DraftCard({ draft }: { draft: Draft }) {
         <CardContent className="pt-0">
           <div className="flex gap-2 pt-4 border-t border-border">
             <Button
-              onClick={() => approveMut.mutate()}
+              onClick={() => approveMut.mutate({})}
               disabled={disabled || approveMut.isPending}
               className="flex-1"
             >

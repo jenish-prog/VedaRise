@@ -1,6 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import type { TablesUpdate } from "@/integrations/supabase/types";
 import { GoogleDecoder } from "google-news-url-decoder";
 
 export const listDrafts = createServerFn({ method: "GET" })
@@ -8,24 +7,27 @@ export const listDrafts = createServerFn({ method: "GET" })
     z.object({ runDate: z.string().optional() }).parse(input ?? {}),
   )
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { mysqlQuery } = await import("@/integrations/mysql/client.server");
     const date = data.runDate ?? new Date().toISOString().slice(0, 10);
-    const { data: drafts, error } = await supabaseAdmin
-      .from("drafts")
-      .select("*, post_results(*)")
-      .eq("run_date", date)
-      .order("rank", { ascending: true });
-    if (error) throw new Error(error.message);
+    
+    const drafts = await mysqlQuery<any[]>(
+      "SELECT * FROM drafts WHERE run_date = ? ORDER BY `rank` ASC",
+      [date]
+    );
 
-    // Refresh signed image URLs (30-day)
-    for (const d of drafts ?? []) {
-      if (d.image_path) {
-        const { data: signed } = await supabaseAdmin.storage
-          .from("post-images")
-          .createSignedUrl(d.image_path, 60 * 60 * 24 * 30);
-        if (signed?.signedUrl) d.image_url = signed.signedUrl;
+    if (drafts.length > 0) {
+      const draftIds = drafts.map((d) => d.id);
+      const placeholders = draftIds.map(() => "?").join(",");
+      const results = await mysqlQuery<any[]>(
+        `SELECT * FROM post_results WHERE draft_id IN (${placeholders})`,
+        draftIds
+      );
+
+      for (const d of drafts) {
+        d.post_results = results.filter((r) => r.draft_id === d.id);
       }
     }
+
     return { runDate: date, drafts: drafts ?? [] };
   });
 
@@ -50,27 +52,51 @@ export const updateDraft = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const patch: TablesUpdate<"drafts"> = {};
-    if (data.title !== undefined) patch.title = data.title;
-    if (data.summary !== undefined) patch.summary = data.summary;
-    if (data.caption !== undefined) patch.caption = data.caption;
-    if (data.hashtags !== undefined) patch.hashtags = data.hashtags;
-    if (data.channels !== undefined) patch.channels = data.channels;
-    const { error } = await supabaseAdmin.from("drafts").update(patch).eq("id", data.id);
-    if (error) throw new Error(error.message);
+    const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+    const fields: string[] = [];
+    const params: any[] = [];
+
+    if (data.title !== undefined) {
+      fields.push("title = ?");
+      params.push(data.title);
+    }
+    if (data.summary !== undefined) {
+      fields.push("summary = ?");
+      params.push(data.summary);
+    }
+    if (data.caption !== undefined) {
+      fields.push("caption = ?");
+      params.push(data.caption);
+    }
+    if (data.hashtags !== undefined) {
+      fields.push("hashtags = ?");
+      params.push(JSON.stringify(data.hashtags));
+    }
+    if (data.channels !== undefined) {
+      fields.push("channels = ?");
+      params.push(JSON.stringify(data.channels));
+    }
+
+    if (fields.length > 0) {
+      fields.push("updated_at = NOW()");
+      params.push(data.id);
+      await mysqlQuery(
+        `UPDATE drafts SET ${fields.join(", ")} WHERE id = ?`,
+        params
+      );
+    }
+
     return { ok: true };
   });
 
 export const rejectDraft = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { error } = await supabaseAdmin
-      .from("drafts")
-      .update({ status: "rejected" })
-      .eq("id", data.id);
-    if (error) throw new Error(error.message);
+    const { mysqlQuery } = await import("@/integrations/mysql/client.server");
+    await mysqlQuery(
+      "UPDATE drafts SET status = 'rejected', updated_at = NOW() WHERE id = ?",
+      [data.id]
+    );
     return { ok: true };
   });
 
@@ -84,41 +110,36 @@ export const approveAndPost = createServerFn({ method: "POST" })
       .parse(input),
   )
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { postDraft } = await import("./posting.server");
-    return postDraft(supabaseAdmin, data.id, data.channels);
+    return postDraft(data.id, data.channels);
   });
 
 export const regenerateDraft = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { regenerateSingleDraft } = await import("./pipeline.server");
-    return regenerateSingleDraft(supabaseAdmin, data.id);
+    return regenerateSingleDraft(data.id);
   });
 
 export const regenerateImageDraft = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { regenerateSingleImage } = await import("./pipeline.server");
-    return regenerateSingleImage(supabaseAdmin, data.id);
+    return regenerateSingleImage(data.id);
   });
 
 export const regenerateCaptionDraft = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { regenerateSingleCaption } = await import("./pipeline.server");
-    return regenerateSingleCaption(supabaseAdmin, data.id);
+    return regenerateSingleCaption(data.id);
   });
 
 export const regenerateHashtagsDraft = createServerFn({ method: "POST" })
   .inputValidator((input: unknown) => z.object({ id: z.string().uuid() }).parse(input))
   .handler(async ({ data }) => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { regenerateSingleHashtags } = await import("./pipeline.server");
-    return regenerateSingleHashtags(supabaseAdmin, data.id);
+    return regenerateSingleHashtags(data.id);
   });
 
 export const getArticleContent = createServerFn({ method: "GET" })

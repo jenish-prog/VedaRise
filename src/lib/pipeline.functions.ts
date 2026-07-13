@@ -2,7 +2,6 @@ import { createServerFn } from "@tanstack/react-start";
 
 // Runs the daily pipeline: search news → pick top 5 → generate image + caption → save drafts.
 export const runDailyPipeline = createServerFn({ method: "POST" }).handler(async () => {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
   const { runPipeline } = await import("./pipeline.server");
-  return runPipeline(supabaseAdmin);
+  return runPipeline();
 });
